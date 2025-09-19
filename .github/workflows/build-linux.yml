@@ -1,0 +1,131 @@
+name: Build Linux Binaries
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Build for Linux
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86, x64]
+        include:
+          - arch: x86
+            gcc_arch: i686
+            target: i686-linux-gnu
+            packages: gcc-multilib g++-multilib libc6-dev-i386
+          - arch: x64
+            gcc_arch: x86_64
+            target: x86_64-linux-gnu
+            packages: build-essential
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Create build directories
+        run: |
+          mkdir -p tmp
+          mkdir -p bin
+
+      - name: Build masscan for ${{ matrix.arch }}
+        run: |
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            export CC="gcc -m32"
+            export CFLAGS="-g -ggdb -Wall -O2 -m32"
+            export LDFLAGS="-m32"
+          else
+            export CC="gcc"
+            export CFLAGS="-g -ggdb -Wall -O2"
+            export LDFLAGS=""
+          fi
+          make clean
+          make
+
+      - name: Test binary
+        run: |
+          file bin/masscan
+          ./bin/masscan --version || true
+          ./bin/masscan --selftest
+
+      - name: Rename binary
+        run: |
+          mv bin/masscan bin/masscan-linux-${{ matrix.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: masscan-linux-${{ matrix.arch }}
+          path: bin/masscan-linux-${{ matrix.arch }}
+          retention-days: 30
+
+  create-release:
+    name: Create Release with Binaries
+    needs: build-linux
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp artifacts/masscan-linux-x86/masscan-linux-x86 release/
+          cp artifacts/masscan-linux-x64/masscan-linux-x64 release/
+          chmod +x release/*
+          
+          # Create checksums
+          cd release
+          sha256sum * > checksums.txt
+          ls -la
+
+      - name: Get short commit hash
+        id: commit
+        run: echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ steps.commit.outputs.short_sha }}
+          name: Linux Binaries - ${{ steps.commit.outputs.short_sha }}
+          body: |
+            Automated build of masscan for Linux platforms
+            
+            **Files:**
+            - `masscan-linux-x86` - 32-bit Linux binary
+            - `masscan-linux-x64` - 64-bit Linux binary
+            - `checksums.txt` - SHA256 checksums
+            
+            **Usage:**
+            ```bash
+            chmod +x masscan-linux-x64
+            ./masscan-linux-x64 --help
+            ```
+            
+            Commit: ${{ github.sha }}
+          files: |
+            release/*
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
